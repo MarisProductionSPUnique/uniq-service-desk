@@ -12,7 +12,13 @@ public class OracleConnectivityProbe implements ApplicationRunner {
  private static final Logger log=LoggerFactory.getLogger(OracleConnectivityProbe.class);
  public void run(ApplicationArguments args) {
   String host=System.getenv("DB_HOST"), port=System.getenv("DB_PORT"), service=System.getenv("DB_SERVICE"), user=System.getenv("DB_USERNAME"), password=System.getenv("DB_PASSWORD");
-  if(host==null || port==null || service==null || user==null || password==null || System.getenv("TS_AUTHKEY")==null) { log.info("Oracle diagnostic skipped: configuration incomplete"); return; }
+  java.util.List<String> missing=new java.util.ArrayList<>();
+  for(String key : new String[]{"DB_HOST","DB_PORT","DB_SERVICE","DB_USERNAME","DB_PASSWORD","TS_AUTHKEY"}) {
+   String value=System.getenv(key);
+   if(value==null || value.isBlank()) missing.add(key);
+  }
+  if(!missing.isEmpty()) { log.warn("Oracle diagnostic skipped: missing or blank environment variables: {}",missing); return; }
+  log.info("Oracle diagnostic: required environment variables present");
   if(!host.matches("[0-9.]+") || !port.matches("[0-9]+") || !service.matches("[A-Za-z0-9_]+")) { log.warn("Oracle diagnostic skipped: invalid configuration"); return; }
   Thread worker=new Thread(()->{
    Properties p=new Properties();
