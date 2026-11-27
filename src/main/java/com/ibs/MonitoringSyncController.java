@@ -73,6 +73,6 @@ public class MonitoringSyncController {
    }catch(Exception e){if(e instanceof InterruptedException)Thread.currentThread().interrupt();result.put("EIMP",Map.of("status","UNAVAILABLE"));}
    finally{if(logged)try{send(c,request(base+"/logout").POST(HttpRequest.BodyPublishers.noBody()).build());}catch(Exception ignored){}}
   }
-  result.put("createdIncidentIds",created,failures);result.put("mode",deliver?"ON_DEMAND_DELIVERY":"READ_ONLY_PREVIEW");result.put("timestamp",Instant.now().toString());return result;
+  result.put("createdIncidentIds",created);result.put("deliveryFailures",failures);result.put("mode",deliver?"ON_DEMAND_DELIVERY":"READ_ONLY_PREVIEW");result.put("timestamp",Instant.now().toString());return result;
  }
 }
