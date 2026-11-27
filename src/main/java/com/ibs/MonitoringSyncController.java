@@ -23,7 +23,7 @@ public class MonitoringSyncController {
  @GetMapping("/settings") public synchronized Map<String,Boolean> settings(HttpServletRequest r){authorize(r);return Map.of("liveEnabled",liveEnabled);}
  @PutMapping("/settings") public synchronized Map<String,Boolean> settings(HttpServletRequest r,@RequestBody Map<String,Boolean> body){authorize(r);if(body.get("liveEnabled")==null)throw new ResponseStatusException(HttpStatus.BAD_REQUEST);liveEnabled=body.get("liveEnabled");return Map.of("liveEnabled",liveEnabled);}
  private void authorize(HttpServletRequest r){if(!SupportPortalController.authorized(r))throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);}
- private void deliver(HttpServletRequest r,String rule,String priority,List<String> created){Instant now=Instant.now();delivered.entrySet().removeIf(e->e.getValue().isBefore(now.minusSeconds(3600)));if(delivered.size()>=10||delivered.containsKey(rule))return;String impact=priority.equals("P1")?"1":priority.equals("P2")?"2":"3";String urgency=priority.equals("P4")?"2":"1";var t=incidents.create(r,Map.of("application","EIMP","title","[MONITORING] "+rule,"description","Eligible upstream EIMP alert; verify whether underlying data is simulated before remediation.","impact",impact,"urgency",urgency,"category","Application","requestId","EIMP-ALERT-"+rule));delivered.put(rule,now);created.add(t.get("id").toString());}
+ private void deliver(HttpServletRequest r,String app,String rule,String priority,List<String> created){Instant now=Instant.now();delivered.entrySet().removeIf(e->e.getValue().isBefore(now.minusSeconds(3600)));String dedup=app+":"+rule;if(delivered.size()>=10||delivered.containsKey(dedup))return;String impact=priority.equals("P1")?"1":priority.equals("P2")?"2":"3";String urgency=priority.equals("P4")?"2":"1";var t=incidents.create(r,Map.of("application",app,"title","[MONITORING] "+rule,"description","Eligible upstream monitoring alert; verify whether underlying data is simulated before remediation.","impact",impact,"urgency",urgency,"category","Application","requestId",app+"-ALERT-"+rule));delivered.put(dedup,now);created.add(t.get("id").toString());}
  private JsonNode send(HttpClient client,HttpRequest request)throws Exception{
   var response=client.send(request,HttpResponse.BodyHandlers.ofInputStream());
   try(InputStream in=response.body()){
@@ -47,7 +47,11 @@ public class MonitoringSyncController {
    String url="https://ibs-banking-appserver.onrender.com/api/support/logs?level=ERROR&from="+Instant.now().minusSeconds(300);
    JsonNode rows=send(client(),request(url).header("X-Support-Key",key).GET().build());
    if(!rows.isArray())throw new IOException("Invalid response");
-   result.put("IBS",Map.of("status","OK","recentErrorCount",rows.size(),"windowSeconds",300));
+   int http500=0,http503=0,other=0;
+   for(JsonNode row:rows){int status=row.path("status").asInt();if(status==500)http500++;else if(status==503)http503++;else if(status>=500&&status<600)other++;}
+   List<String> eligible=new ArrayList<>();if(http500>=5)eligible.add("HTTP_500");if(http503>=3)eligible.add("HTTP_503");if(other>=5)eligible.add("OTHER_5XX");
+   result.put("IBS",Map.of("status","OK","recentErrorCount",rows.size(),"windowSeconds",300,"eligibleRules",eligible,"http500",http500,"http503",http503,"other5xx",other));
+   if(deliver)for(String rule:eligible)deliver(r,"IBS",rule,rule.equals("OTHER_5XX")?"P3":"P2",created);
   }catch(Exception e){if(e instanceof InterruptedException)Thread.currentThread().interrupt();result.put("IBS",Map.of("status","UNAVAILABLE"));}
   String user=System.getenv("MONITOR_EIMP_USERNAME"),password=System.getenv("MONITOR_EIMP_PASSWORD");
   if(user==null||user.isBlank()||password==null||password.isBlank())result.put("EIMP",Map.of("status","NOT_CONFIGURED"));
@@ -59,7 +63,7 @@ public class MonitoringSyncController {
     if(!rows.isArray())throw new IOException("Invalid response");
     List<String> eligible=new ArrayList<>();for(JsonNode row:rows)if(row.path("incidentEligible").asBoolean(false))eligible.add(row.path("id").asText());
     result.put("EIMP",Map.of("status","OK","evaluatedCount",rows.size(),"eligibleRules",eligible));
-    if(deliver){JsonNode config=send(c,request(base+"/alerts/config").GET().build());if(config.path("controls").path("enabled").asBoolean(false)&&!config.path("controls").path("maintenance").asBoolean(true)){for(JsonNode rule:config.path("rules")){String id=rule.path("id").asText(),priority=rule.path("priority").asText();if(rule.path("active").asBoolean(false)&&eligible.contains(id)&&Set.of("P1","P2","P3","P4").contains(priority)&&id.matches("[A-Z_0-9]{1,60}"))deliver(r,id,priority,created);}}}
+    if(deliver){JsonNode config=send(c,request(base+"/alerts/config").GET().build());if(config.path("controls").path("enabled").asBoolean(false)&&!config.path("controls").path("maintenance").asBoolean(true)){for(JsonNode rule:config.path("rules")){String id=rule.path("id").asText(),priority=rule.path("priority").asText();if(rule.path("active").asBoolean(false)&&eligible.contains(id)&&Set.of("P1","P2","P3","P4").contains(priority)&&id.matches("[A-Z_0-9]{1,60}"))deliver(r,"EIMP",id,priority,created);}}}
 
    }catch(Exception e){if(e instanceof InterruptedException)Thread.currentThread().interrupt();result.put("EIMP",Map.of("status","UNAVAILABLE"));}
    finally{if(logged)try{send(c,request(base+"/logout").POST(HttpRequest.BodyPublishers.noBody()).build());}catch(Exception ignored){}}
