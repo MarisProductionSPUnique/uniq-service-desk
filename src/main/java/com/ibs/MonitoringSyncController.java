@@ -15,8 +15,15 @@ import org.springframework.http.HttpStatus;
 @RequestMapping("/api/support/monitoring")
 public class MonitoringSyncController {
  private final ObjectMapper json;
+ private final ServiceDeskController incidents;
+ private boolean liveEnabled=false;
+ private final Map<String,Instant> delivered=new LinkedHashMap<>();
  private Instant next=Instant.EPOCH;
- public MonitoringSyncController(ObjectMapper json){this.json=json;}
+ public MonitoringSyncController(ObjectMapper json,ServiceDeskController incidents){this.json=json;this.incidents=incidents;}
+ @GetMapping("/settings") public synchronized Map<String,Boolean> settings(HttpServletRequest r){authorize(r);return Map.of("liveEnabled",liveEnabled);}
+ @PutMapping("/settings") public synchronized Map<String,Boolean> settings(HttpServletRequest r,@RequestBody Map<String,Boolean> body){authorize(r);if(body.get("liveEnabled")==null)throw new ResponseStatusException(HttpStatus.BAD_REQUEST);liveEnabled=body.get("liveEnabled");return Map.of("liveEnabled",liveEnabled);}
+ private void authorize(HttpServletRequest r){if(!SupportPortalController.authorized(r))throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);}
+ private void deliver(HttpServletRequest r,String rule,String priority,List<String> created){Instant now=Instant.now();delivered.entrySet().removeIf(e->e.getValue().isBefore(now.minusSeconds(3600)));if(delivered.size()>=10||delivered.containsKey(rule))return;String impact=priority.equals("P1")?"1":priority.equals("P2")?"2":"3";String urgency=priority.equals("P4")?"2":"1";var t=incidents.create(r,Map.of("application","EIMP","title","[MONITORING] "+rule,"description","Eligible upstream EIMP alert; verify whether underlying data is simulated before remediation.","impact",impact,"urgency",urgency,"category","Application","requestId","EIMP-ALERT-"+rule));delivered.put(rule,now);created.add(t.get("id").toString());}
  private JsonNode send(HttpClient client,HttpRequest request)throws Exception{
   var response=client.send(request,HttpResponse.BodyHandlers.ofInputStream());
   try(InputStream in=response.body()){
@@ -27,11 +34,13 @@ public class MonitoringSyncController {
  }
  private HttpRequest.Builder request(String url){return HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(15)).header("Accept","application/json");}
  private HttpClient client(){return HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).followRedirects(HttpClient.Redirect.NEVER).cookieHandler(new CookieManager(null,CookiePolicy.ACCEPT_ORIGINAL_SERVER)).build();}
- @PostMapping("/preview") public synchronized Map<String,Object> preview(HttpServletRequest r){
+ @PostMapping("/preview") public synchronized Map<String,Object> preview(HttpServletRequest r){return collect(r,false);}
+ @PostMapping("/sync") public synchronized Map<String,Object> sync(HttpServletRequest r){authorize(r);if(!liveEnabled)throw new ResponseStatusException(HttpStatus.CONFLICT,"Live delivery disabled");return collect(r,true);}
+ private Map<String,Object> collect(HttpServletRequest r,boolean deliver){
   if(!SupportPortalController.authorized(r))throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
   if(Instant.now().isBefore(next))throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS);
   next=Instant.now().plusSeconds(60);
-  Map<String,Object> result=new LinkedHashMap<>();
+  Map<String,Object> result=new LinkedHashMap<>();List<String> created=new ArrayList<>();
   String key=System.getenv("MONITOR_IBS_SUPPORT_KEY");
   if(key==null||key.isBlank())result.put("IBS",Map.of("status","NOT_CONFIGURED"));
   else try{
@@ -50,9 +59,11 @@ public class MonitoringSyncController {
     if(!rows.isArray())throw new IOException("Invalid response");
     List<String> eligible=new ArrayList<>();for(JsonNode row:rows)if(row.path("incidentEligible").asBoolean(false))eligible.add(row.path("id").asText());
     result.put("EIMP",Map.of("status","OK","evaluatedCount",rows.size(),"eligibleRules",eligible));
+    if(deliver){JsonNode config=send(c,request(base+"/alerts/config").GET().build());if(config.path("controls").path("enabled").asBoolean(false)&&!config.path("controls").path("maintenance").asBoolean(true)){for(JsonNode rule:config.path("rules")){String id=rule.path("id").asText(),priority=rule.path("priority").asText();if(rule.path("active").asBoolean(false)&&eligible.contains(id)&&Set.of("P1","P2","P3","P4").contains(priority)&&id.matches("[A-Z_0-9]{1,60}"))deliver(r,id,priority,created);}}}
+
    }catch(Exception e){if(e instanceof InterruptedException)Thread.currentThread().interrupt();result.put("EIMP",Map.of("status","UNAVAILABLE"));}
    finally{if(logged)try{send(c,request(base+"/logout").POST(HttpRequest.BodyPublishers.noBody()).build());}catch(Exception ignored){}}
   }
-  result.put("mode","READ_ONLY_PREVIEW");result.put("timestamp",Instant.now().toString());return result;
+  result.put("createdIncidentIds",created);result.put("mode",deliver?"ON_DEMAND_DELIVERY":"READ_ONLY_PREVIEW");result.put("timestamp",Instant.now().toString());return result;
  }
 }
