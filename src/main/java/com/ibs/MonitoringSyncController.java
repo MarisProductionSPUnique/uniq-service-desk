@@ -25,12 +25,16 @@ public class MonitoringSyncController {
  private void authorize(HttpServletRequest r){if(!SupportPortalController.authorized(r))throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);}
  private void deliver(HttpServletRequest r,String app,String rule,String priority,List<String> created,List<String> failures){Instant now=Instant.now();delivered.entrySet().removeIf(e->e.getValue().isBefore(now.minusSeconds(3600)));String dedup=app+":"+rule;if(delivered.size()>=10||delivered.containsKey(dedup))return;String impact=priority.equals("P1")?"1":priority.equals("P2")?"2":"3";String urgency=priority.equals("P4")?"2":"1";try{var t=incidents.create(r,Map.of("application",app,"title","[MONITORING] "+rule,"description","Eligible upstream monitoring alert; verify whether underlying data is simulated before remediation.","impact",impact,"urgency",urgency,"category","Application","requestId",app+"-ALERT-"+rule));delivered.put(dedup,now);created.add(t.get("id").toString());}catch(RuntimeException e){failures.add(dedup);}}
  private JsonNode send(HttpClient client,HttpRequest request)throws Exception{
-  var response=client.send(request,HttpResponse.BodyHandlers.ofInputStream());
+  var future=client.sendAsync(request,HttpResponse.BodyHandlers.ofInputStream());
+  var response=future.get(16,java.util.concurrent.TimeUnit.SECONDS);
   try(InputStream in=response.body()){
    if(response.statusCode()<200||response.statusCode()>=300)throw new IOException("Upstream HTTP "+response.statusCode());
-   byte[] bytes=in.readNBytes(1048577);if(bytes.length>1048576)throw new IOException("Response limit");
+   var reader=java.util.concurrent.CompletableFuture.supplyAsync(()->{try{return in.readNBytes(1048577);}catch(IOException e){throw new java.io.UncheckedIOException(e);}});
+   byte[] bytes;
+   try{bytes=reader.get(15,java.util.concurrent.TimeUnit.SECONDS);}finally{reader.cancel(true);}
+   if(bytes.length>1048576)throw new IOException("Response limit");
    return bytes.length==0?json.nullNode():json.readTree(bytes);
-  }
+  }finally{future.cancel(true);}
  }
  private boolean fresh(String timestamp){try{Instant t=Instant.parse(timestamp),now=Instant.now();return !t.isBefore(now.minusSeconds(45))&&!t.isAfter(now.plusSeconds(5));}catch(Exception e){return false;}}
  private HttpRequest.Builder request(String url){return HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(15)).header("Accept","application/json");}
